@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Space Shooter</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: #04050d;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    font-family: "Courier New", monospace;
+    color: #9fe8b1;
+  }
+  canvas {
+    border: 2px solid #1e3a5f;
+    background: #04050d;
+  }
+  #hint { margin: 0; font-size: 14px; letter-spacing: 1px; opacity: .75; }
+</style>
+</head>
+<body>
+<canvas id="game" width="800" height="600"></canvas>
+<p id="hint">&#8592; &#8594; MOVE &nbsp;|&nbsp; SPACE FIRE &nbsp;|&nbsp; ENTER RESTART</p>
+<script>
+"use strict";
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const W = canvas.width, H = canvas.height;
+
+/* ---------------- sprites (pixel matrices) ---------------- */
+const CELL = 3;
+const SPRITES = [
+  { // squid — top row
+    color: "#7cfc66", points: 30,
+    frames: [
+      ["...##...",
+       "...##...",
+       ".######.",
+       "##.##.##",
+       "########",
+       "#.####.#",
+       "#.#..#.#",
+       "..#..#.."],
+      ["...##...",
+       "..####..",
+       ".######.",
+       "###..###",
+       "########",
+       ".#.##.#.",
+       ".#....#.",
+       "#.#..#.#"],
+    ],
+  },
+  { // crab — middle rows
+    color: "#57c7ff", points: 20,
+    frames: [
+      ["..#.....#..",
+       "...#...#...",
+       "..#######..",
+       ".##.###.##.",
+       "###########",
+       "#.#######.#",
+       "#.#.....#.#",
+       "...##.##..."],
+      ["..#.....#..",
+       "#..#...#..#",
+       "#.#######.#",
+       "###.###.###",
+       "###########",
+       ".#########.",
+       "..#.....#..",
+       ".#.......#."],
+    ],
+  },
+  { // octopus — bottom row
+    color: "#ff7ad9", points: 10,
+    frames: [
+      ["....####....",
+       ".##########.",
+       "############",
+       "###.####.###",
+       "############",
+       "...##..##...",
+       "..##....##..",
+       "##........##"],
+      ["....####....",
+       ".##########.",
+       "############",
+       "###.####.###",
+       "############",
+       "..###..###..",
+       ".##......##.",
+       "..#......#.."],
+    ],
+  },
+];
+
+/* ---------------- config ---------------- */
+const COLS = 10, ROWS = 5;
+const COL_SPACING = 52, ROW_SPACING = 44;
+const SHIP_SPEED = 420;
+const BULLET_SPEED = 560;
+const FIRE_COOLDOWN = 0.3;
+const MAX_PLAYER_BULLETS = 3;
+
+/* ---------------- state ---------------- */
+let score, lives, wave, state, time = 0;
+let ship, bullets, enemyBullets, particles, aliens;
+let fireTimer, invuln, alienDir, enemyFireTimer;
+
+const stars = Array.from({ length: 90 }, () => ({
+  x: Math.random() * W, y: Math.random() * H,
+  s: Math.random() < 0.3 ? 2 : 1,
+  v: 12 + Math.random() * 28,
+  a: 0.25 + Math.random() * 0.6,
+}));
+
+function spawnWave() {
+  aliens = [];
+  const x0 = (W - (COLS - 1) * COL_SPACING) / 2;
+  const y0 = 70 + Math.min(wave - 1, 6) * 16;
+  for (let r = 0; r < ROWS; r++) {
+    const type = r === 0 ? 0 : r === ROWS - 1 ? 2 : 1;
+    const sp = SPRITES[type];
+    const w = sp.frames[0][0].length * CELL, h = 8 * CELL;
+    for (let c = 0; c < COLS; c++) {
+      aliens.push({
+        x: x0 + c * COL_SPACING - w / 2,
+        y: y0 + r * ROW_SPACING,
+        w, h, type, alive: true,
+      });
+    }
+  }
+  alienDir = 1;
+  enemyFireTimer = 1.2;
+}
+
+function reset() {
+  score = 0; lives = 3; wave = 1;
+  bullets = []; enemyBullets = []; particles = [];
+  ship = { x: W / 2, y: H - 50, w: 40, h: 22 };
+  fireTimer = 0; invuln = 1.5;
+  spawnWave();
+  state = "playing";
+}
+
+/* ---------------- input ---------------- */
+const keys = {};
+const USED = ["ArrowLeft", "ArrowRight", "Space", "Enter"];
+window.addEventListener("keydown", (e) => {
+  if (USED.includes(e.code)) e.preventDefault();
+  keys[e.code] = true;
+  if (e.code === "Enter" && state === "gameover") reset();
+});
+window.addEventListener("keyup", (e) => { keys[e.code] = false; });
+window.addEventListener("blur", () => { for (const k in keys) keys[k] = false; });
+canvas.addEventListener("click", () => { if (state === "gameover") reset(); });
+
+/* ---------------- update ---------------- */
+function explode(x, y, color) {
+  for (let i = 0; i < 14; i++) {
+    const ang = Math.random() * Math.PI * 2;
+    const spd = 40 + Math.random() * 160;
+    particles.push({
+      x, y,
+      vx: Math.cos(ang) * spd, vy: Math.sin(ang) * spd,
+      life: 0.35 + Math.random() * 0.35, color,
+    });
+  }
+}
+
+function loseLife() {
+  lives--;
+  explode(ship.x, ship.y, "#ffd166");
+  invuln = 2;
+  if (lives <= 0) state = "gameover";
+}
+
+function update(dt) {
+  time += dt;
+  for (const s of stars) {
+    s.y += s.v * dt;
+    if (s.y > H) { s.y = -2; s.x = Math.random() * W; }
+  }
+  for (const p of particles) {
+    p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt;
+  }
+  particles = particles.filter((p) => p.life > 0);
+
+  if (state !== "playing") return;
+
+  // ship movement
+  if (keys.ArrowLeft) ship.x -= SHIP_SPEED * dt;
+  if (keys.ArrowRight) ship.x += SHIP_SPEED * dt;
+  ship.x = Math.max(ship.w / 2 + 8, Math.min(W - ship.w / 2 - 8, ship.x));
+
+  // firing
+  fireTimer -= dt;
+  if (keys.Space && fireTimer <= 0 && bullets.length < MAX_PLAYER_BULLETS) {
+    bullets.push({ x: ship.x, y: ship.y - 16, vy: -BULLET_SPEED });
+    fireTimer = FIRE_COOLDOWN;
+  }
+
+  // bullets in flight
+  for (const b of bullets) b.y += b.vy * dt;
+  bullets = bullets.filter((b) => b.y > -20);
+  for (const b of enemyBullets) b.y += b.vy * dt;
+  enemyBullets = enemyBullets.filter((b) => b.y < H + 20);
+
+  // alien march: side to side, dropping when hitting an edge,
+  // speeding up as the swarm thins out and waves progress
+  const alive = aliens.filter((a) => a.alive);
+  const total = COLS * ROWS;
+  const speed = Math.min(300, 55 + wave * 14 + (1 - alive.length / total) * 170);
+  let minX = Infinity, maxX = -Infinity;
+  for (const a of alive) {
+    if (a.x < minX) minX = a.x;
+    if (a.x + a.w > maxX) maxX = a.x + a.w;
+  }
+  if (alive.length) {
+    if ((alienDir > 0 && maxX + speed * dt >= W - 14) ||
+        (alienDir < 0 && minX - speed * dt <= 14)) {
+      alienDir *= -1;
+      for (const a of alive) a.y += 18;
+    } else {
+      for (const a of alive) a.x += alienDir * speed * dt;
+    }
+  }
+
+  // aliens breaching the defense line cost a life and reset the wave
+  if (alive.some((a) => a.y + a.h >= ship.y - 14)) {
+    loseLife();
+    if (state === "playing") spawnWave();
+    return;
+  }
+
+  // enemy fire: bottom-most alien of a random column shoots
+  enemyFireTimer -= dt;
+  if (enemyFireTimer <= 0 && alive.length) {
+    const byCol = new Map();
+    for (const a of alive) {
+      const k = Math.round(a.x);
+      if (!byCol.has(k) || a.y > byCol.get(k).y) byCol.set(k, a);
+    }
+    const shooters = [...byCol.values()];
+    const s = shooters[Math.floor(Math.random() * shooters.length)];
+    enemyBullets.push({
+      x: s.x + s.w / 2, y: s.y + s.h,
+      vy: 210 + wave * 15,
+    });
+    enemyFireTimer = Math.max(0.3, 0.7 + Math.random() * 1.2 - wave * 0.05);
+  }
+
+  // player bullets vs aliens
+  for (const b of bullets) {
+    for (const a of aliens) {
+      if (!a.alive) continue;
+      if (b.x >= a.x - 2 && b.x <= a.x + a.w + 2 &&
+          b.y <= a.y + a.h && b.y + 10 >= a.y) {
+        a.alive = false;
+        b.dead = true;
+        score += SPRITES[a.type].points;
+        explode(b.x, a.y + a.h / 2, SPRITES[a.type].color);
+        break;
+      }
+    }
+  }
+  bullets = bullets.filter((b) => !b.dead);
+
+  // enemy bullets vs ship
+  if (invuln > 0) invuln -= dt;
+  for (const b of enemyBullets) {
+    if (invuln <= 0 &&
+        Math.abs(b.x - ship.x) <= ship.w / 2 &&
+        b.y + 6 >= ship.y - ship.h / 2 && b.y <= ship.y + ship.h / 2) {
+      b.dead = true;
+      loseLife();
+      break;
+    }
+  }
+  enemyBullets = enemyBullets.filter((b) => !b.dead);
+
+  // wave cleared
+  if (aliens.every((a) => !a.alive)) {
+    wave++;
+    score += 100;
+    spawnWave();
+    invuln = Math.max(invuln, 1);
+  }
+}
+
+/* ---------------- draw ---------------- */
+function drawSprite(sp, frame, x, y) {
+  ctx.fillStyle = sp.color;
+  const f = sp.frames[frame];
+  for (let r = 0; r < f.length; r++)
+    for (let c = 0; c < f[r].length; c++)
+      if (f[r][c] === "#") ctx.fillRect(x + c * CELL, y + r * CELL, CELL, CELL);
+}
+
+function drawShip(cx, cy, scale, color) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.scale(scale, scale);
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(0, -14);
+  ctx.lineTo(-9, 6);
+  ctx.lineTo(9, 6);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillRect(-20, 6, 40, 6);
+  ctx.fillRect(-2, -18, 4, 4);
+  ctx.fillStyle = "#ff9f43";
+  ctx.fillRect(-4, 12, 8, 4);
+  ctx.restore();
+}
+
+function draw() {
+  ctx.fillStyle = "#04050d";
+  ctx.fillRect(0, 0, W, H);
+
+  for (const s of stars) {
+    ctx.fillStyle = `rgba(255,255,255,${s.a})`;
+    ctx.fillRect(s.x, s.y, s.s, s.s);
+  }
+
+  // defense line
+  ctx.fillStyle = "rgba(124,252,102,.35)";
+  ctx.fillRect(12, ship.y + 18, W - 24, 2);
+
+  // aliens
+  const frame = ((Math.floor(time * 2.5) % 2) + 2) % 2;
+  for (const a of aliens) if (a.alive) drawSprite(SPRITES[a.type], frame, a.x, a.y);
+
+  // bullets
+  ctx.fillStyle = "#7df9ff";
+  for (const b of bullets) ctx.fillRect(b.x - 1.5, b.y, 3, 12);
+  ctx.fillStyle = "#ff5d5d";
+  for (const b of enemyBullets) ctx.fillRect(b.x - 1.5, b.y, 3, 10);
+
+  // ship (blinks while invulnerable, hidden once destroyed)
+  if (state === "playing" && (invuln <= 0 || Math.floor(time * 12) % 2 === 0))
+    drawShip(ship.x, ship.y, 1, "#e8f4ff");
+
+  // particles
+  for (const p of particles) {
+    ctx.globalAlpha = Math.max(0, Math.min(1, p.life * 2.5));
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3);
+  }
+  ctx.globalAlpha = 1;
+
+  // HUD
+  ctx.textBaseline = "top";
+  ctx.font = "bold 18px 'Courier New', monospace";
+  ctx.fillStyle = "#e8f4ff";
+  ctx.textAlign = "left";
+  ctx.fillText("SCORE " + String(score).padStart(5, "0"), 14, 10);
+  ctx.textAlign = "center";
+  ctx.fillStyle = "#ffd166";
+  ctx.fillText("WAVE " + wave, W / 2, 10);
+  ctx.textAlign = "right";
+  ctx.fillStyle = "#e8f4ff";
+  ctx.fillText("LIVES", W - 24 - lives * 36, 10);
+  for (let i = 0; i < lives; i++) drawShip(W - 26 - i * 36, 24, 0.6, "#7cfc66");
+
+  // game over screen
+  if (state === "gameover") {
+    ctx.fillStyle = "rgba(2,4,12,.8)";
+    ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#ff5d5d";
+    ctx.font = "bold 52px 'Courier New', monospace";
+    ctx.fillText("GAME OVER", W / 2, H / 2 - 78);
+    ctx.fillStyle = "#e8f4ff";
+    ctx.font = "bold 22px 'Courier New', monospace";
+    ctx.fillText("FINAL SCORE  " + score, W / 2, H / 2 - 8);
+    ctx.fillText("WAVES CLEARED  " + (wave - 1), W / 2, H / 2 + 22);
+    if (Math.floor(time * 2) % 2 === 0) {
+      ctx.fillStyle = "#7cfc66";
+      ctx.font = "bold 18px 'Courier New', monospace";
+      ctx.fillText("PRESS ENTER TO RESTART", W / 2, H / 2 + 76);
+    }
+  }
+}
+
+/* ---------------- main loop ---------------- */
+reset();
+let last = performance.now();
+function loop(now) {
+  // schedule first so a transient frame error can never stall the loop;
+  // clamp dt >= 0 because the rAF timestamp can precede performance.now()
+  requestAnimationFrame(loop);
+  const dt = Math.max(0, Math.min(0.033, (now - last) / 1000));
+  last = now;
+  update(dt);
+  draw();
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
